@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
     # vehicle parameters
-    vehicle_width: 2.5
-    vehicle_length: 5.0
+    vehicle_width: 0.5
+    vehicle_length: 0.5
     vehicle_height: 2.0
 
     # save settings

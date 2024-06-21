@@ -1,6 +1,7 @@
 #ifndef LANE_WIDTH_CALCULATOR__NODE_HPP_
 #define LANE_WIDTH_CALCULATOR__NODE_HPP_
 
+
 #include <lanelet2_extension/utility/message_conversion.hpp>
 #include <lanelet2_extension/utility/query.hpp>
 #include <lanelet2_extension/utility/utilities.hpp>
@@ -36,6 +37,10 @@
 #include <vector>
 #include <iostream>
 #include <fstream>
+
+#include <std_msgs/msg/int32_multi_array.hpp>
+#include <std_msgs/msg/int32.hpp>
+#include <autoware_utils/autoware_utils.hpp>
 
 
 namespace lane_width_calculator
@@ -102,6 +107,9 @@ public:
 
   // subscribers
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_debug_markers_;
+  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr pub_candidate_lanelet_ids_;
+  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr pub_driving_lanelet_id_;
+
   rclcpp::Subscription<PoseStamped>::SharedPtr sub_objects_;
   rclcpp::Subscription<HADMapBin>::SharedPtr sub_map_;
   rclcpp::Subscription<Odometry>::SharedPtr sub_odom_;

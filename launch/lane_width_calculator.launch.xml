@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
 <launch>
   <arg name="vector_map_topic" default="/map/vector_map"/>
+  
   <arg name="pose_topic" default="/localization/pose_estimator/pose"/>
   <arg name="odom_topic" default="/localization/kinematic_state"/>
   <arg name="output_topic" default="/debug/vehicle_lane_marker"/>

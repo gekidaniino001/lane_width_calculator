@@ -1,0 +1,152 @@
+diff --git a/autoware/src/vehicle/external/lane_width_calculator/config/lane_width_calculator.param.yaml b/autoware/src/vehicle/external/lane_width_calculator/config/lane_width_calculator.param.yaml
+index 0f6032c6..f6008287 100644
+--- a/autoware/src/vehicle/external/lane_width_calculator/config/lane_width_calculator.param.yaml
++++ b/autoware/src/vehicle/external/lane_width_calculator/config/lane_width_calculator.param.yaml
+@@ -1,8 +1,8 @@
+ /**:
+   ros__parameters:
+     # vehicle parameters
+-    vehicle_width: 2.5
+-    vehicle_length: 5.0
++    vehicle_width: 0.5
++    vehicle_length: 0.5
+     vehicle_height: 2.0
+ 
+     # save settings
+diff --git a/autoware/src/vehicle/external/lane_width_calculator/include/lane_width_calculator/node.hpp b/autoware/src/vehicle/external/lane_width_calculator/include/lane_width_calculator/node.hpp
+index bac11f0f..9af97622 100644
+--- a/autoware/src/vehicle/external/lane_width_calculator/include/lane_width_calculator/node.hpp
++++ b/autoware/src/vehicle/external/lane_width_calculator/include/lane_width_calculator/node.hpp
+@@ -1,6 +1,7 @@
+ #ifndef LANE_WIDTH_CALCULATOR__NODE_HPP_
+ #define LANE_WIDTH_CALCULATOR__NODE_HPP_
+ 
++
+ #include <lanelet2_extension/utility/message_conversion.hpp>
+ #include <lanelet2_extension/utility/query.hpp>
+ #include <lanelet2_extension/utility/utilities.hpp>
+@@ -37,6 +38,10 @@
+ #include <iostream>
+ #include <fstream>
+ 
++#include <std_msgs/msg/int32_multi_array.hpp>
++#include <std_msgs/msg/int32.hpp>
++#include <autoware_utils/autoware_utils.hpp>
++
+ 
+ namespace lane_width_calculator
+ {
+@@ -102,6 +107,9 @@ public:
+ 
+   // subscribers
+   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_debug_markers_;
++  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr pub_candidate_lanelet_ids_;
++  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr pub_driving_lanelet_id_;
++
+   rclcpp::Subscription<PoseStamped>::SharedPtr sub_objects_;
+   rclcpp::Subscription<HADMapBin>::SharedPtr sub_map_;
+   rclcpp::Subscription<Odometry>::SharedPtr sub_odom_;
+diff --git a/autoware/src/vehicle/external/lane_width_calculator/launch/lane_width_calculator.launch.xml b/autoware/src/vehicle/external/lane_width_calculator/launch/lane_width_calculator.launch.xml
+index 586760dd..3de1ecd5 100644
+--- a/autoware/src/vehicle/external/lane_width_calculator/launch/lane_width_calculator.launch.xml
++++ b/autoware/src/vehicle/external/lane_width_calculator/launch/lane_width_calculator.launch.xml
+@@ -1,6 +1,7 @@
+ <?xml version="1.0"?>
+ <launch>
+   <arg name="vector_map_topic" default="/map/vector_map"/>
++  
+   <arg name="pose_topic" default="/localization/pose_estimator/pose"/>
+   <arg name="odom_topic" default="/localization/kinematic_state"/>
+   <arg name="output_topic" default="/debug/vehicle_lane_marker"/>
+diff --git a/autoware/src/vehicle/external/lane_width_calculator/src/node.cpp b/autoware/src/vehicle/external/lane_width_calculator/src/node.cpp
+index 3f1145f3..a6bc3c80 100644
+--- a/autoware/src/vehicle/external/lane_width_calculator/src/node.cpp
++++ b/autoware/src/vehicle/external/lane_width_calculator/src/node.cpp
+@@ -1,7 +1,5 @@
+-
+ #include "lane_width_calculator/node.hpp"
+ 
+-
+ namespace lane_width_calculator
+ {
+ 
+@@ -60,6 +58,9 @@ CalculatorNode::CalculatorNode(const rclcpp::NodeOptions & options)
+     std::bind(&CalculatorNode::odomCallback, this, std::placeholders::_1));
+ 
+   pub_debug_markers_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("~/output/debug_markers", 1);
++  pub_candidate_lanelet_ids_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("candidate_lanelet_ids", 1);
++  pub_driving_lanelet_id_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("driving_lanelet_ids", 1);
++
+   // parameters
+   vehicle_width_ = this->declare_parameter<double>("vehicle_width");
+   vehicle_length_ = this->declare_parameter<double>("vehicle_length");
+@@ -121,10 +122,13 @@ void CalculatorNode::poseCallback(const PoseStamped::ConstSharedPtr msg)
+   const auto all_lanelets = lanelet::utils::query::laneletLayer(lanelet_map_ptr_);
+ 
+   lanelet::ConstLanelets current_lanelets;
++  std::cout << "pose cb" << std::endl;
+   if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets)) {
+     // do something
+     updateVehiclePoses(query_pose);
+ 
++
++
+     calcLeftOrRightOffsetsInOneLane(current_lanelets.front(), query_pose);
+   }
+ }
+@@ -138,15 +142,54 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
+ 
+   geometry_msgs::msg::Pose query_pose = msg->pose.pose;
+   const auto all_lanelets = lanelet::utils::query::laneletLayer(lanelet_map_ptr_);
+-
+   lanelet::ConstLanelets current_lanelets;
+   if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets)) {
+     // do something
+     updateVehiclePoses(query_pose);
++    // Publish current lanelet IDs as an int32 multi array
++    std_msgs::msg::Int32MultiArray msg_ids;
++    
++
++    msg_ids.data.reserve(current_lanelets.size());
++    for (const auto& lanelet : current_lanelets) {
++      msg_ids.data.push_back(lanelet.id());
++    }
++    pub_candidate_lanelet_ids_->publish(msg_ids);
++
+     // calc left/right lateral offsets for each pose
+     for(auto & pose_pair: position_pose_map_){
+       position_offset_map_[pose_pair.first] = calcLeftOrRightOffsetsInOneLane(current_lanelets.front(), pose_pair.second);
+     }
++    // find by angle
++    double degrees = 20.0;
++    double min_angle = degrees * 0.01745329;//std::numeric_limits<double>::max();
++    double pose_yaw = tf2::getYaw(query_pose.orientation);
++    lanelet::BasicPoint2d search_point(query_pose.position.x, query_pose.position.y);
++
++    std_msgs::msg::Int32MultiArray msg_ids_;
++    msg_ids_.data.reserve(current_lanelets.size());
++    for (const auto & llt : current_lanelets) {
++      lanelet::ConstLineString3d segment = lanelet::utils::getClosestSegment(search_point, llt.centerline());
++      double segment_angle = std::atan2(
++        segment.back().y() - segment.front().y(), segment.back().x() - segment.front().x());
++      double angle_diff = std::abs(autoware_utils::normalize_radian(segment_angle - pose_yaw));
++      if (angle_diff < min_angle) {
++        // std::cout << "select yaw" << std::endl;
++        // std::cout << "  " << llt.id() << std::endl;
++        msg_ids_.data.push_back(llt.id());
++        
++      }
++      else
++      {
++        // pass 
++        // std::cout << "remove yaw" << std::endl;
++        // std::cout << "  " << llt.id() << std::endl;
++        // std::cout << "  " << angle_diff << std::endl;
++      }
++
++      pub_driving_lanelet_id_->publish(msg_ids_);
++      
++    }
+     // publish visualization marker
+     publishBBOX();
+ 

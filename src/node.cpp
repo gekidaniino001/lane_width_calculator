@@ -1,6 +1,4 @@
-
 #include "lane_width_calculator/node.hpp"
-
 
 namespace lane_width_calculator
 {
@@ -60,6 +58,9 @@ CalculatorNode::CalculatorNode(const rclcpp::NodeOptions & options)
     std::bind(&CalculatorNode::odomCallback, this, std::placeholders::_1));
 
   pub_debug_markers_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("~/output/debug_markers", 1);
+  pub_candidate_lanelet_ids_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("candidate_lanelet_ids", 1);
+  pub_driving_lanelet_id_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("driving_lanelet_ids", 1);
+
   // parameters
   vehicle_width_ = this->declare_parameter<double>("vehicle_width");
   vehicle_length_ = this->declare_parameter<double>("vehicle_length");
@@ -121,9 +122,12 @@ void CalculatorNode::poseCallback(const PoseStamped::ConstSharedPtr msg)
   const auto all_lanelets = lanelet::utils::query::laneletLayer(lanelet_map_ptr_);
 
   lanelet::ConstLanelets current_lanelets;
+  std::cout << "pose cb" << std::endl;
   if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets)) {
     // do something
     updateVehiclePoses(query_pose);
+
+
 
     calcLeftOrRightOffsetsInOneLane(current_lanelets.front(), query_pose);
   }
@@ -138,14 +142,53 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
 
   geometry_msgs::msg::Pose query_pose = msg->pose.pose;
   const auto all_lanelets = lanelet::utils::query::laneletLayer(lanelet_map_ptr_);
-
   lanelet::ConstLanelets current_lanelets;
   if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets)) {
     // do something
     updateVehiclePoses(query_pose);
+    // Publish current lanelet IDs as an int32 multi array
+    std_msgs::msg::Int32MultiArray msg_ids;
+    
+
+    msg_ids.data.reserve(current_lanelets.size());
+    for (const auto& lanelet : current_lanelets) {
+      msg_ids.data.push_back(lanelet.id());
+    }
+    pub_candidate_lanelet_ids_->publish(msg_ids);
+
     // calc left/right lateral offsets for each pose
     for(auto & pose_pair: position_pose_map_){
       position_offset_map_[pose_pair.first] = calcLeftOrRightOffsetsInOneLane(current_lanelets.front(), pose_pair.second);
+    }
+    // find by angle
+    double degrees = 20.0;
+    double min_angle = degrees * 0.01745329;//std::numeric_limits<double>::max();
+    double pose_yaw = tf2::getYaw(query_pose.orientation);
+    lanelet::BasicPoint2d search_point(query_pose.position.x, query_pose.position.y);
+
+    std_msgs::msg::Int32MultiArray msg_ids_;
+    msg_ids_.data.reserve(current_lanelets.size());
+    for (const auto & llt : current_lanelets) {
+      lanelet::ConstLineString3d segment = lanelet::utils::getClosestSegment(search_point, llt.centerline());
+      double segment_angle = std::atan2(
+        segment.back().y() - segment.front().y(), segment.back().x() - segment.front().x());
+      double angle_diff = std::abs(autoware_utils::normalize_radian(segment_angle - pose_yaw));
+      if (angle_diff < min_angle) {
+        // std::cout << "select yaw" << std::endl;
+        // std::cout << "  " << llt.id() << std::endl;
+        msg_ids_.data.push_back(llt.id());
+        
+      }
+      else
+      {
+        // pass 
+        // std::cout << "remove yaw" << std::endl;
+        // std::cout << "  " << llt.id() << std::endl;
+        // std::cout << "  " << angle_diff << std::endl;
+      }
+
+      pub_driving_lanelet_id_->publish(msg_ids_);
+      
     }
     // publish visualization marker
     publishBBOX();
