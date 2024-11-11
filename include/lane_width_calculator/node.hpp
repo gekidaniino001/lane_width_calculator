@@ -13,6 +13,7 @@
 #include <tier4_autoware_utils/geometry/boost_geometry.hpp>
 #include <tier4_autoware_utils/geometry/geometry.hpp>
 
+
 #include <autoware_auto_mapping_msgs/msg/had_map_bin.hpp>
 #include <autoware_auto_perception_msgs/msg/predicted_objects.hpp>
 #include <autoware_auto_perception_msgs/msg/tracked_objects.hpp>
@@ -41,6 +42,7 @@
 #include <std_msgs/msg/int32_multi_array.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <autoware_utils/autoware_utils.hpp>
+#include <diagnostic_updater/diagnostic_updater.hpp>
 
 
 namespace lane_width_calculator
@@ -113,16 +115,27 @@ public:
   rclcpp::Subscription<PoseStamped>::SharedPtr sub_objects_;
   rclcpp::Subscription<HADMapBin>::SharedPtr sub_map_;
   rclcpp::Subscription<Odometry>::SharedPtr sub_odom_;
+  rclcpp::Subscription<autoware_auto_planning_msgs::msg::PathWithLaneId>::SharedPtr sub_path_;
   double vehicle_width_;
   double vehicle_length_;
   double vehicle_height_;
   bool save_to_csv_;
+  bool is_vehicle_inside_lane_;
+
   std::string save_file_name_;
   std::ofstream file_stream_;
 
   std::unordered_map<std::string, geometry_msgs::msg::Pose> position_pose_map_;
   std::unordered_map<std::string, std::array<double,2>> position_offset_map_;
   std::vector<std::string> position_list_;
+  std::set<int64_t> current_path_ids_;
+  std::set<int64_t> candidate_lanelet_ids_;
+  std::set<int64_t> judging_lanelet_id_;
+  diagnostic_updater::Updater diagnostics_updater_;
+
+
+  double out_of_lane_error_thresh_;  // threshold in seconds
+  rclcpp::Time last_in_lane_time_;
 
 // Member Functions
   void mapCallback(const HADMapBin::ConstSharedPtr msg);
@@ -132,6 +145,11 @@ public:
   bool vehicleIsInsideLane();
   void publishBBOX();
   bool appendToCSV();
+  bool isLaneletInCurrentPath(const lanelet::ConstLanelet& lanelet) const;
+  void pathCallback(const autoware_auto_planning_msgs::msg::PathWithLaneId::ConstSharedPtr msg);
+  void checkLaneStatus(diagnostic_updater::DiagnosticStatusWrapper& stat);
+
+
 };
 
 
