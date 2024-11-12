@@ -4,6 +4,7 @@
     vehicle_width: 0.5
     vehicle_length: 0.5
     vehicle_height: 2.0
+    outside_lane_threshold_sec: 3.0
 
     # save settings
     save_to_csv: true
