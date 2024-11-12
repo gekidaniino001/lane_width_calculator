@@ -107,6 +107,10 @@ public:
   bool map_loaded_ = false;
   bool use_odom_;
 
+  rclcpp::Time last_outside_lane_time_;
+  bool was_previously_outside_ = false;
+  double outside_lane_threshold_sec_;
+
   // subscribers
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_debug_markers_;
   rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr pub_candidate_lanelet_ids_;

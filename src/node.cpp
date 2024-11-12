@@ -69,6 +69,7 @@ diagnostics_updater_(this)
   vehicle_width_ = this->declare_parameter<double>("vehicle_width");
   vehicle_length_ = this->declare_parameter<double>("vehicle_length");
   vehicle_height_ = this->declare_parameter<double>("vehicle_height");
+  outside_lane_threshold_sec_ = this->declare_parameter<double>("outside_lane_threshold_sec", 1.0);
 
   // if set to true, use odometry instead of pose
   use_odom_ = this->declare_parameter<bool>("use_odom");
@@ -233,30 +234,12 @@ void CalculatorNode::checkLaneStatus(diagnostic_updater::DiagnosticStatusWrapper
   const double left_offset = offsets[0];
   const double right_offset = offsets[1];
 
-  // Set status
-  if (is_vehicle_inside_lane_) {
-    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Vehicle is inside lane");
-  } else {
-    std::stringstream ss;
-    ss << std::fixed << std::setprecision(3);
-    if (left_offset > 0.0) {
-      ss << "Outside left boundary by " << left_offset << "m";
-    } else if (right_offset < 0.0) {
-      ss << "Outside right boundary by " << std::abs(right_offset) << "m";
-    }
-    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR, ss.str());
-  }
-  
-  // Add offset values
-  stat.add("left_offset", std::to_string(left_offset));
-  stat.add("right_offset", std::to_string(right_offset));
-
   // Add path IDs
   std::stringstream path_ss;
   for (const auto& id : current_path_ids_) {
     path_ss << id << " ";
   }
-  stat.add("path_ids", path_ss.str());
+  stat.add("path_lanelet_ids", path_ss.str());
 
   // Add current lanelet IDs where vehicle is
   geometry_msgs::msg::Pose center_pose = position_pose_map_["center"];
@@ -267,14 +250,47 @@ void CalculatorNode::checkLaneStatus(diagnostic_updater::DiagnosticStatusWrapper
       current_ss << lanelet.id() << " ";
     }
   }
-  stat.add("current_lanelets", current_ss.str());
+  stat.add("current_lanelet_ids", current_ss.str());
 
   // Add the lanelet IDs used for judgment
   std::stringstream judge_ss;
   for (const auto& id : judging_lanelet_id_) {
     judge_ss << id << " ";
   }
-  stat.add("judging_lanelets", judge_ss.str());
+  stat.add("judging_lanelets_ids", judge_ss.str());
+
+  const auto current_time = this->now();
+  if (!is_vehicle_inside_lane_) {
+    if (!was_previously_outside_) {
+      last_outside_lane_time_ = current_time;
+      was_previously_outside_ = true;
+    }
+    const double time_outside = (current_time - last_outside_lane_time_).seconds();
+    
+    if (time_outside >= outside_lane_threshold_sec_) {
+      std::stringstream ss;
+      ss << std::fixed << std::setprecision(3);
+      if (left_offset > 0.0) {
+        ss << "Outside left boundary by " << left_offset << "m for " << time_outside << "s";
+      } else if (right_offset < 0.0) {
+        ss << "Outside right boundary by " << std::abs(right_offset) << "m for " << time_outside << "s";
+      }
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR, ss.str());
+    } else {
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, 
+        "Vehicle outside lane but within time threshold");
+    }
+    
+    stat.add("time_outside_lane", std::to_string(time_outside));
+  } else {
+    was_previously_outside_ = false;
+    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Vehicle is inside lane");
+  }
+  
+  // Add offset values
+  stat.add("left_offset", std::to_string(left_offset));
+  stat.add("right_offset", std::to_string(right_offset));
+
 }
 
 // Helper function to check if lanelet is in current path
@@ -287,33 +303,18 @@ bool CalculatorNode::isLaneletInCurrentPath(const lanelet::ConstLanelet& lanelet
 // Update the vehicleIsInsideLane function
 bool CalculatorNode::vehicleIsInsideLane()
 {
-  std::cout << "\n=== Debug Output ===" << std::endl;
-  std::cout << "Current Path IDs: ";
   // current_path_ids_はpath_with_lane_idと同等 planningから計算されるpathのid
-  for (const auto& id : current_path_ids_) {
-    std::cout << id << " ";
-  }
-  std::cout << std::endl;
 
   if (current_path_ids_.empty()) {
-    std::cout << "No path data available for lane validation" << std::endl;
     is_vehicle_inside_lane_ = false;
     return false;
   }
   geometry_msgs::msg::Pose center_pose = position_pose_map_["center"];
   lanelet::ConstLanelets current_lanelets;
   if (!lanelet::utils::query::getCurrentLanelets(const_lanelets_, center_pose, &current_lanelets)) {
-    std::cout << "Vehicle not in any lanelet" << std::endl;
     is_vehicle_inside_lane_ = false;
     return false;
   }
-
-
-  std::cout << "Current Lanelets: ";
-  for (const auto& lanelet : current_lanelets) {
-    std::cout << lanelet.id() << " ";
-  }
-  std::cout << std::endl;
 
   bool found_matching_lanelet = false;
   bool is_inside_any = false;
@@ -321,15 +322,11 @@ bool CalculatorNode::vehicleIsInsideLane()
   
   // Check each current lanelet
   for (const auto& lanelet : current_lanelets) {
-    std::cout << "Checking lanelet " << lanelet.id() << ": ";
-    
     // Skip if this lanelet is not in the current path
     if (current_path_ids_.find(lanelet.id()) == current_path_ids_.end()) {
-      std::cout << "not in current path, skipping" << std::endl;
       continue;
     }
 
-    std::cout << "in current path" << std::endl;
     found_matching_lanelet = true;
     bool is_inside_current = true;
     
@@ -361,20 +358,14 @@ bool CalculatorNode::vehicleIsInsideLane()
     if (is_inside_current) {
       is_inside_any = true;
       judging_lanelet_id_.insert(lanelet.id());
-      std::cout << "  Vehicle is inside lanelet " << lanelet.id() << std::endl;
       break;
     }
   }
 
 
   is_vehicle_inside_lane_ = is_inside_any;
-
-  std::cout << "Final result: Vehicle is " 
-            << (is_inside_any ? "inside" : "!!!!!!!!!!!!!!!!!outside") << " lane" << std::endl;
-  std::cout << "===================" << std::endl;
   
   if (!found_matching_lanelet) {
-    std::cout << "No matching lanelet found in current path" << std::endl;
     return false;
   }
   
