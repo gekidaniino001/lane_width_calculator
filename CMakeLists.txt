@@ -20,6 +20,16 @@ rclcpp_components_register_node(lane_width_calculator_node
   EXECUTABLE lane_width_calculator
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_lane_width_calculator_node
+    test/test_lane_width_calculator_node.cpp
+  )
+  target_link_libraries(test_lane_width_calculator_node
+    lane_width_calculator_node
+  )
+endif()
+
 ament_auto_package(
   INSTALL_TO_SHARE
   launch

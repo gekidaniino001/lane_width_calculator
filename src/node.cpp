@@ -139,7 +139,6 @@ void CalculatorNode::poseCallback(const PoseStamped::ConstSharedPtr msg)
   }
 
   geometry_msgs::msg::Pose query_pose = msg->pose;
-  const auto all_lanelets = lanelet::utils::query::laneletLayer(lanelet_map_ptr_);
 
   lanelet::ConstLanelets current_lanelets;
   std::cout << "pose cb" << std::endl;
@@ -161,16 +160,21 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
   }
 
   geometry_msgs::msg::Pose query_pose = msg->pose.pose;
-  const auto all_lanelets = lanelet::utils::query::laneletLayer(lanelet_map_ptr_);
-  lanelet::ConstLanelets current_lanelets;
   updateVehiclePoses(query_pose);
+
+  // getCurrentLanelets はマップ全体を走査する重い処理。1tickにつき1回だけ計算し、
+  // vehicleIsInsideLane/checkLaneStatus/publishBBOX/appendToCSV で使い回す。
+  has_current_lanelets_by_pose_ =
+    lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets_by_pose_);
+
   vehicleIsInsideLane();
   diagnostics_updater_.force_update();
-  if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets)) {
+  if (has_current_lanelets_by_pose_) {
+    const auto & current_lanelets = current_lanelets_by_pose_;
 
     // Publish current lanelet IDs as an int32 multi array
     std_msgs::msg::Int32MultiArray msg_ids;
-    
+
 
     msg_ids.data.reserve(current_lanelets.size());
     for (const auto& lanelet : current_lanelets) {
@@ -198,11 +202,8 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
       if (angle_diff < min_angle) {
         msg_ids_.data.push_back(llt.id());
       }
-      else
-      {
-      }
-      pub_driving_lanelet_id_->publish(msg_ids_);
     }
+    pub_driving_lanelet_id_->publish(msg_ids_);
     // publish visualization marker
     publishBBOX();
     // save to csv
@@ -242,11 +243,10 @@ void CalculatorNode::checkLaneStatus(diagnostic_updater::DiagnosticStatusWrapper
   stat.add("path_lanelet_ids", path_ss.str());
 
   // Add current lanelet IDs where vehicle is
-  geometry_msgs::msg::Pose center_pose = position_pose_map_["center"];
-  lanelet::ConstLanelets current_lanelets;
+  // (odomCallbackで計算済みのcurrent_lanelets_by_pose_を使い回し、再計算しない)
   std::stringstream current_ss;
-  if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, center_pose, &current_lanelets)) {
-    for (const auto& lanelet : current_lanelets) {
+  if (has_current_lanelets_by_pose_) {
+    for (const auto& lanelet : current_lanelets_by_pose_) {
       current_ss << lanelet.id() << " ";
     }
   }
@@ -309,9 +309,8 @@ bool CalculatorNode::vehicleIsInsideLane()
     is_vehicle_inside_lane_ = false;
     return false;
   }
-  geometry_msgs::msg::Pose center_pose = position_pose_map_["center"];
-  lanelet::ConstLanelets current_lanelets;
-  if (!lanelet::utils::query::getCurrentLanelets(const_lanelets_, center_pose, &current_lanelets)) {
+  // odomCallbackで計算済みのcurrent_lanelets_by_pose_を使い回し、再計算しない
+  if (!has_current_lanelets_by_pose_) {
     is_vehicle_inside_lane_ = false;
     return false;
   }
@@ -319,9 +318,9 @@ bool CalculatorNode::vehicleIsInsideLane()
   bool found_matching_lanelet = false;
   bool is_inside_any = false;
   judging_lanelet_id_.clear();  // Reset at the start
-  
+
   // Check each current lanelet
-  for (const auto& lanelet : current_lanelets) {
+  for (const auto& lanelet : current_lanelets_by_pose_) {
     // Skip if this lanelet is not in the current path
     if (current_path_ids_.find(lanelet.id()) == current_path_ids_.end()) {
       continue;
@@ -374,7 +373,9 @@ bool CalculatorNode::vehicleIsInsideLane()
 
 void CalculatorNode::publishBBOX()
 {
-  const bool is_inside = vehicleIsInsideLane();
+  // vehicleIsInsideLane()はodomCallback内で既に呼ばれ、is_vehicle_inside_lane_に結果が入っている。
+  // ここで再計算はしない。
+  const bool is_inside = is_vehicle_inside_lane_;
 
   visualization_msgs::msg::Marker marker;
   marker.header.frame_id = "map"; // frame id
@@ -424,7 +425,8 @@ bool CalculatorNode::appendToCSV()
   }
 
   // 3. get if the vehicle is inside lane
-  const bool is_inside = vehicleIsInsideLane();
+  // (vehicleIsInsideLane()はodomCallback内で既に呼ばれているため再計算しない)
+  const bool is_inside = is_vehicle_inside_lane_;
   const int is_inside_int = is_inside ? 1 : 0;
   file_stream_ << is_inside_int << std::endl;
   return true;

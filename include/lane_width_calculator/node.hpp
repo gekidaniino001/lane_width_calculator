@@ -107,6 +107,11 @@ public:
   bool map_loaded_ = false;
   bool use_odom_;
 
+  // 現在の車両位置(query pose)を含むlanelet群。1コールバック内で使い回すためのキャッシュ
+  // (getCurrentLanelets はマップ全体を走査する重い処理のため、tickごとに1回だけ計算する)
+  lanelet::ConstLanelets current_lanelets_by_pose_;
+  bool has_current_lanelets_by_pose_ = false;
+
   rclcpp::Time last_outside_lane_time_;
   bool was_previously_outside_ = false;
   double outside_lane_threshold_sec_;
