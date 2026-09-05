@@ -3,6 +3,14 @@
 namespace lane_width_calculator
 {
 
+// return the lateral offset from the boundary line (すでにPoint配列に変換済みの場合)
+// value is positive if the vehicle is on the right side of the boundary line
+double calcLateralOffset(
+  const std::vector<geometry_msgs::msg::Point> & boundary_path, const geometry_msgs::msg::Pose & search_pose)
+{
+  return motion_utils::calcLateralOffset(boundary_path, search_pose.position);
+}
+
 // return the lateral offset from the boundary line
 // value is positive if the vehicle is on the right side of the boundary line
 double calcLateralOffset(
@@ -15,7 +23,7 @@ double calcLateralOffset(
     boundary_path[i] = tier4_autoware_utils::createPoint(x, y, 0.0);
   }
 
-  return motion_utils::calcLateralOffset(boundary_path, search_pose.position);
+  return calcLateralOffset(boundary_path, search_pose);
 }
 
 geometry_msgs::msg::Pose calcPoseFromRelativeOffset(
@@ -124,10 +132,47 @@ void CalculatorNode::mapCallback(const HADMapBin::ConstSharedPtr msg)
   RCLCPP_INFO(get_logger(), "[lane width calculator]: Map is loaded");
 
   const_lanelets_.clear();
+  boundary_path_cache_.clear();
   for (auto l : lanelet_map_ptr_->laneletLayer) {
     const_lanelets_.push_back(l);
+
+    // leftBound2d/rightBound2dのPoint変換はmap読み込み時に1回だけ行い、
+    // 毎odomコールバックでの再変換を避ける(calcLeftOrRightOffsetsCached参照)
+    BoundaryPaths boundary_paths;
+    const lanelet::ConstLineString2d left_bound = l.leftBound2d();
+    boundary_paths.left.resize(left_bound.size());
+    for (size_t i = 0; i < left_bound.size(); ++i) {
+      boundary_paths.left[i] =
+        tier4_autoware_utils::createPoint(left_bound[i].x(), left_bound[i].y(), 0.0);
+    }
+    const lanelet::ConstLineString2d right_bound = l.rightBound2d();
+    boundary_paths.right.resize(right_bound.size());
+    for (size_t i = 0; i < right_bound.size(); ++i) {
+      boundary_paths.right[i] =
+        tier4_autoware_utils::createPoint(right_bound[i].x(), right_bound[i].y(), 0.0);
+    }
+    boundary_path_cache_.emplace(l.id(), std::move(boundary_paths));
   }
   map_loaded_ = true;
+}
+
+// キャッシュ済みのleft/right境界線(BoundaryPaths)を使って左右オフセットを計算する。
+// calcLeftOrRightOffsetsInOneLane()と異なり、boundary_line->vector<Point>の変換を
+// 毎回行わずに済む(mapCallbackで変換済みのものを使い回す)。
+std::array<double, 2> CalculatorNode::calcLeftOrRightOffsetsCached(
+  const lanelet::ConstLanelet & lanelet, const geometry_msgs::msg::Pose & search_pose)
+{
+  const auto it = boundary_path_cache_.find(lanelet.id());
+  if (it == boundary_path_cache_.end()) {
+    // キャッシュに無い場合(通常は発生しない)は従来通りその場で変換して計算する
+    RCLCPP_WARN_ONCE(
+      get_logger(), "boundary_path_cache_ has no entry for lanelet id %ld. Falling back.",
+      lanelet.id());
+    return calcLeftOrRightOffsetsInOneLane(lanelet, search_pose);
+  }
+  const double left_offset = calcLateralOffset(it->second.left, search_pose);
+  const double right_offset = calcLateralOffset(it->second.right, search_pose);
+  return {left_offset, right_offset};
 }
 
 // pose callback is not used if use_odom_ is true
@@ -148,7 +193,7 @@ void CalculatorNode::poseCallback(const PoseStamped::ConstSharedPtr msg)
 
 
 
-    calcLeftOrRightOffsetsInOneLane(current_lanelets.front(), query_pose);
+    calcLeftOrRightOffsetsCached(current_lanelets.front(), query_pose);
   }
 }
 
@@ -184,7 +229,7 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
 
     // calc left/right lateral offsets for each pose
     for(auto & pose_pair: position_pose_map_){
-      position_offset_map_[pose_pair.first] = calcLeftOrRightOffsetsInOneLane(current_lanelets.front(), pose_pair.second);
+      position_offset_map_[pose_pair.first] = calcLeftOrRightOffsetsCached(current_lanelets.front(), pose_pair.second);
     }
     // find by angle
     double degrees = 20.0;
@@ -336,7 +381,7 @@ bool CalculatorNode::vehicleIsInsideLane()
       const auto & pose = pose_pair.second;
       
       // Calculate offsets for this position in this lanelet
-      auto offsets = calcLeftOrRightOffsetsInOneLane(lanelet, pose);
+      auto offsets = calcLeftOrRightOffsetsCached(lanelet, pose);
       const auto left_offset = offsets[0];
       const auto right_offset = offsets[1];
       

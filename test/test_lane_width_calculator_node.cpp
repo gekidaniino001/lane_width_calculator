@@ -6,6 +6,9 @@
 //    (current_lanelets_by_pose_ / has_current_lanelets_by_pose_ メンバを追加)
 //  - driving_lanelet_idsトピックが for ループの中でpublishされていたバグ(候補レーンの数だけ
 //    冗長にpublishしていた)を、ループの外で1回だけpublishするよう修正
+//  - leftBound2d/rightBound2dのPoint配列変換をmapCallback時に1回だけ行いキャッシュする
+//    ようにした(boundary_path_cache_ / calcLeftOrRightOffsetsCached)。以前は毎odom
+//    コールバックの度に、レーン数×5点(center等)×2(left/right)ぶん変換し直していた。
 //
 // ヘッダのメンバ・メソッドが全てpublicなので、コールバックを直接呼び出して
 // 内部状態(current_lanelets_by_pose_ 等)を直接検証できる。
@@ -18,6 +21,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -197,6 +201,93 @@ TEST(LaneWidthCalculatorNode, DrivingLaneletIdsPublishedOnlyOncePerTick)
   ASSERT_EQ(node->current_lanelets_by_pose_.size(), 2u)
     << "テスト前提: current_lanelets候補が2つであること";
   EXPECT_EQ(receive_count, 1);
+
+  rclcpp::shutdown();
+}
+
+// mapCallback時にboundary_path_cache_が各lanelet分正しく作られていることを確認する。
+TEST(LaneWidthCalculatorNode, BoundaryPathCacheIsPopulatedOnMapCallback)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<CalculatorNode>(makeNodeOptions());
+
+  const Lanelet lanelet_a = makeStraightLanelet(2.0);
+  const Lanelet lanelet_b = makeStraightLanelet(3.0);
+  node->mapCallback(toMapMsg({lanelet_a, lanelet_b}));
+
+  ASSERT_EQ(node->boundary_path_cache_.size(), 2u);
+  for (const auto & ll : {lanelet_a, lanelet_b}) {
+    const auto it = node->boundary_path_cache_.find(ll.id());
+    ASSERT_NE(it, node->boundary_path_cache_.end());
+    // 直進レーン(2点の境界線)なので、変換後も2点のままであること
+    EXPECT_EQ(it->second.left.size(), 2u);
+    EXPECT_EQ(it->second.right.size(), 2u);
+  }
+
+  rclcpp::shutdown();
+}
+
+// calcLeftOrRightOffsetsCached が、キャッシュされたPoint配列に対してmotion_utils::calcLateralOffsetを
+// 呼んだ場合と完全に同じ値を返すことを確認する(=キャッシュ化してもロジック・数値が変わらないこと)。
+TEST(LaneWidthCalculatorNode, CachedOffsetsMatchDirectCalculation)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<CalculatorNode>(makeNodeOptions());
+
+  const double half_width = 2.0;
+  const Lanelet lanelet = makeStraightLanelet(half_width);
+  node->mapCallback(toMapMsg({lanelet}));
+
+  // makeStraightLanelet()と全く同じ境界線を手動で再構築し、期待値をmotion_utils側で直接計算する
+  std::vector<geometry_msgs::msg::Point> left_bound_path;
+  left_bound_path.push_back(tier4_autoware_utils::createPoint(0.0, half_width, 0.0));
+  left_bound_path.push_back(tier4_autoware_utils::createPoint(20.0, half_width, 0.0));
+  std::vector<geometry_msgs::msg::Point> right_bound_path;
+  right_bound_path.push_back(tier4_autoware_utils::createPoint(0.0, -half_width, 0.0));
+  right_bound_path.push_back(tier4_autoware_utils::createPoint(20.0, -half_width, 0.0));
+
+  for (const double y : {0.0, 1.0, -1.0}) {
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = 10.0;
+    pose.position.y = y;
+    pose.orientation.w = 1.0;
+
+    const double expected_left = motion_utils::calcLateralOffset(left_bound_path, pose.position);
+    const double expected_right = motion_utils::calcLateralOffset(right_bound_path, pose.position);
+
+    const auto cached_offsets = node->calcLeftOrRightOffsetsCached(lanelet, pose);
+
+    EXPECT_DOUBLE_EQ(cached_offsets[0], expected_left) << "y=" << y;
+    EXPECT_DOUBLE_EQ(cached_offsets[1], expected_right) << "y=" << y;
+  }
+
+  rclcpp::shutdown();
+}
+
+// キャッシュに存在しないlanelet(マップに登録されていないもの)を渡した場合でも
+// フォールバックでクラッシュせず計算できることを確認する。
+TEST(LaneWidthCalculatorNode, CalcOffsetsFallsBackWhenNotCached)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<CalculatorNode>(makeNodeOptions());
+
+  const Lanelet lanelet_in_map = makeStraightLanelet(2.0);
+  node->mapCallback(toMapMsg({lanelet_in_map}));
+
+  // マップに登録していない(=boundary_path_cache_に無い)レーン
+  const Lanelet lanelet_not_cached = makeStraightLanelet(2.0);
+  ASSERT_EQ(
+    node->boundary_path_cache_.find(lanelet_not_cached.id()), node->boundary_path_cache_.end());
+
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = 10.0;
+  pose.position.y = 0.0;
+  pose.orientation.w = 1.0;
+
+  const auto offsets = node->calcLeftOrRightOffsetsCached(lanelet_not_cached, pose);
+  // 幅4mレーンの中心(y=0)なので、左右オフセットはおよそ+-2m前後になるはず
+  EXPECT_NEAR(std::abs(offsets[0]), 2.0, 1e-6);
+  EXPECT_NEAR(std::abs(offsets[1]), 2.0, 1e-6);
 
   rclcpp::shutdown();
 }

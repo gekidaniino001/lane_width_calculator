@@ -52,6 +52,14 @@ using autoware_auto_mapping_msgs::msg::HADMapBin;
 using geometry_msgs::msg::PoseStamped;
 using nav_msgs::msg::Odometry;
 
+// leftBound2d/rightBound2dをgeometry_msgs::msg::Pointの配列へ変換したもの。
+// mapCallback時に各lanelet idごとに1回だけ変換してキャッシュしておくために使う。
+struct BoundaryPaths
+{
+  std::vector<geometry_msgs::msg::Point> left;
+  std::vector<geometry_msgs::msg::Point> right;
+};
+
 enum class ColorSetting {
     RED,
     GREEN,
@@ -112,6 +120,9 @@ public:
   lanelet::ConstLanelets current_lanelets_by_pose_;
   bool has_current_lanelets_by_pose_ = false;
 
+  // 各lanelet(左右境界線)を毎回変換せずに済むように、mapCallback時に1回だけ変換してキャッシュしたもの
+  std::unordered_map<lanelet::Id, BoundaryPaths> boundary_path_cache_;
+
   rclcpp::Time last_outside_lane_time_;
   bool was_previously_outside_ = false;
   double outside_lane_threshold_sec_;
@@ -155,6 +166,8 @@ public:
   void publishBBOX();
   bool appendToCSV();
   bool isLaneletInCurrentPath(const lanelet::ConstLanelet& lanelet) const;
+  std::array<double, 2> calcLeftOrRightOffsetsCached(
+    const lanelet::ConstLanelet & lanelet, const geometry_msgs::msg::Pose & search_pose);
   void pathCallback(const autoware_auto_planning_msgs::msg::PathWithLaneId::ConstSharedPtr msg);
   void checkLaneStatus(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
