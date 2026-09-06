@@ -100,6 +100,29 @@ nav_msgs::msg::Odometry::SharedPtr makeOdomMsg(double x, double y, double yaw = 
 
 }  // namespace
 
+// 実バグの回帰テスト: lanelet::utils::query::getCurrentLanelets()は結果をpush_backするだけで
+// 内部でclearしない。current_lanelets_by_pose_はコールバックをまたいで使い回すメンバ変数なので、
+// 呼び出し前にclear()し忘れると、同じ場所に居続けるだけでtickの度に要素が増え続けてしまう
+// (実際に実車のrosbag再生でCPU使用率が数分でジワジワ100%まで張り付くのを確認して発覚したバグ)。
+TEST(LaneWidthCalculatorNode, CurrentLaneletsByPoseDoesNotGrowAcrossTicks)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<CalculatorNode>(makeNodeOptions());
+
+  const Lanelet lanelet = makeStraightLanelet(2.0);
+  node->mapCallback(toMapMsg({lanelet}));
+  node->pathCallback(makePathMsg({lanelet.id()}));
+
+  // 同じ場所(レーン内)で何度もodomCallbackを呼んでも、current_lanelets_by_pose_のサイズは
+  // 常に「今のポーズにマッチするlanelet数(=1)」のままで、増え続けてはいけない
+  for (int i = 0; i < 50; ++i) {
+    node->odomCallback(makeOdomMsg(10.0, 0.0));
+    ASSERT_EQ(node->current_lanelets_by_pose_.size(), 1u) << "tick " << i;
+  }
+
+  rclcpp::shutdown();
+}
+
 TEST(LaneWidthCalculatorNode, VehicleInsideLaneIsDetected)
 {
   rclcpp::init(0, nullptr);

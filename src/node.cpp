@@ -209,6 +209,10 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
 
   // getCurrentLanelets はマップ全体を走査する重い処理。1tickにつき1回だけ計算し、
   // vehicleIsInsideLane/checkLaneStatus/publishBBOX/appendToCSV で使い回す。
+  // 注意: query::getCurrentLanelets()は結果をpush_backするだけでclearしないため、
+  // 呼び出し前に必ずclear()すること(current_lanelets_by_pose_はメンバ変数で使い回すため、
+  // clearし忘れると毎tick際限なく要素が増え続け、CPU負荷が時間とともに際限なく悪化する)。
+  current_lanelets_by_pose_.clear();
   has_current_lanelets_by_pose_ =
     lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets_by_pose_);
 
