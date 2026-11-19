@@ -116,12 +116,17 @@ public:
   bool use_odom_;
 
   // 現在の車両位置(query pose)を含むlanelet群。1コールバック内で使い回すためのキャッシュ
-  // (getCurrentLanelets はマップ全体を走査する重い処理のため、tickごとに1回だけ計算する)
+  // (findCurrentLanelets()でtickごとに1回だけ計算する)
   lanelet::ConstLanelets current_lanelets_by_pose_;
   bool has_current_lanelets_by_pose_ = false;
 
   // 各lanelet(左右境界線)を毎回変換せずに済むように、mapCallback時に1回だけ変換してキャッシュしたもの
   std::unordered_map<lanelet::Id, BoundaryPaths> boundary_path_cache_;
+
+  // lanelet id -> const_lanelets_内の位置。mapCallbackでconst_lanelets_と同時に作る。
+  // findCurrentLanelets()が、R-treeで見つけたlaneletをconst_lanelets_の並び
+  // (=従来のgetCurrentLanelets()の線形走査と同じ順)に並べ直すために使う。
+  std::unordered_map<lanelet::Id, size_t> lanelet_index_by_id_;
 
   rclcpp::Time last_outside_lane_time_;
   bool was_previously_outside_ = false;
@@ -168,6 +173,8 @@ public:
   bool isLaneletInCurrentPath(const lanelet::ConstLanelet& lanelet) const;
   std::array<double, 2> calcLeftOrRightOffsetsCached(
     const lanelet::ConstLanelet & lanelet, const geometry_msgs::msg::Pose & search_pose);
+  bool findCurrentLanelets(
+    const geometry_msgs::msg::Pose & search_pose, lanelet::ConstLanelets * current_lanelets) const;
   void pathCallback(const autoware_auto_planning_msgs::msg::PathWithLaneId::ConstSharedPtr msg);
   void checkLaneStatus(diagnostic_updater::DiagnosticStatusWrapper& stat);
 

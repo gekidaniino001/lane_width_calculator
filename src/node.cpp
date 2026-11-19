@@ -1,7 +1,19 @@
 #include "lane_width_calculator/node.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
 namespace lane_width_calculator
 {
+
+namespace
+{
+// findCurrentLanelets()でR-treeを引くときに、車両位置の周りへ広げる幅[m]。
+// 境界ちょうどの点が浮動小数点の誤差で候補から漏れないようにするための余裕で、
+// 候補が増えても最後にlanelet::geometry::inside()で判定するので結果は変わらない。
+constexpr double kCurrentLaneletSearchMargin = 0.01;
+}  // namespace
 
 // return the lateral offset from the boundary line (すでにPoint配列に変換済みの場合)
 // value is positive if the vehicle is on the right side of the boundary line
@@ -133,7 +145,10 @@ void CalculatorNode::mapCallback(const HADMapBin::ConstSharedPtr msg)
 
   const_lanelets_.clear();
   boundary_path_cache_.clear();
+  lanelet_index_by_id_.clear();
   for (auto l : lanelet_map_ptr_->laneletLayer) {
+    // const_lanelets_内の位置(findCurrentLanelets()で結果をこの並びに揃えるために使う)
+    lanelet_index_by_id_.emplace(l.id(), const_lanelets_.size());
     const_lanelets_.push_back(l);
 
     // leftBound2d/rightBound2dのPoint変換はmap読み込み時に1回だけ行い、
@@ -175,6 +190,60 @@ std::array<double, 2> CalculatorNode::calcLeftOrRightOffsetsCached(
   return {left_offset, right_offset};
 }
 
+// search_poseを含むlaneletを求める。結果はlanelet::utils::query::getCurrentLanelets(const_lanelets_, ...)と
+// 要素も順序も同じになる(順序はconst_lanelets_の並び。front()を基準にしたオフセット計算や
+// publishする配列の順を変えないため)。
+// getCurrentLanelets()は地図の全laneletについてポリゴンを作って内外判定するので重い
+// (1257 laneletの地図で1回約0.35ms)。ここでは地図のR-tree(laneletLayer.search)で、
+// バウンディングボックスが車両位置を含むlaneletだけに絞ってから、同じ判定(lanelet::geometry::inside)を行う。
+// current_lanelets は最初にclearする(getCurrentLanelets()と違い、呼び出し側でclearしなくてよい)。
+bool CalculatorNode::findCurrentLanelets(
+  const geometry_msgs::msg::Pose & search_pose, lanelet::ConstLanelets * current_lanelets) const
+{
+  current_lanelets->clear();
+  if (!lanelet_map_ptr_) {
+    return false;
+  }
+  if (!std::isfinite(search_pose.position.x) || !std::isfinite(search_pose.position.y)) {
+    // NaN/無限大の位置ではR-treeの検索に頼らず、従来の線形走査と同じ結果を返す
+    return lanelet::utils::query::getCurrentLanelets(const_lanelets_, search_pose, current_lanelets);
+  }
+
+  const lanelet::BasicPoint2d search_point(search_pose.position.x, search_pose.position.y);
+  const lanelet::BasicPoint2d margin(kCurrentLaneletSearchMargin, kCurrentLaneletSearchMargin);
+  const lanelet::BasicPoint2d search_min = search_point - margin;
+  const lanelet::BasicPoint2d search_max = search_point + margin;
+  const lanelet::LaneletMap & map = *lanelet_map_ptr_;
+  const auto candidates = map.laneletLayer.search(lanelet::BoundingBox2d(search_min, search_max));
+
+  // (const_lanelets_内の位置, lanelet)
+  std::vector<std::pair<size_t, lanelet::ConstLanelet>> found;
+  for (const auto & llt : candidates) {
+    if (!lanelet::geometry::inside(llt, search_point)) {
+      continue;
+    }
+    const auto it = lanelet_index_by_id_.find(llt.id());
+    if (it == lanelet_index_by_id_.end()) {
+      // lanelet_index_by_id_はconst_lanelets_と同時に作るので通常は起きない。念のため従来の線形走査に戻す
+      RCLCPP_WARN_ONCE(
+        get_logger(), "lanelet id %ld is not in lanelet_index_by_id_. Falling back to linear search.",
+        llt.id());
+      current_lanelets->clear();
+      return lanelet::utils::query::getCurrentLanelets(const_lanelets_, search_pose, current_lanelets);
+    }
+    found.emplace_back(it->second, llt);
+  }
+
+  std::sort(found.begin(), found.end(), [](const auto & a, const auto & b) {
+    return a.first < b.first;
+  });
+  current_lanelets->reserve(found.size());
+  for (const auto & index_and_lanelet : found) {
+    current_lanelets->push_back(index_and_lanelet.second);
+  }
+  return !current_lanelets->empty();
+}
+
 // pose callback is not used if use_odom_ is true
 void CalculatorNode::poseCallback(const PoseStamped::ConstSharedPtr msg)
 {
@@ -187,7 +256,7 @@ void CalculatorNode::poseCallback(const PoseStamped::ConstSharedPtr msg)
 
   lanelet::ConstLanelets current_lanelets;
   std::cout << "pose cb" << std::endl;
-  if (lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets)) {
+  if (findCurrentLanelets(query_pose, &current_lanelets)) {
     // do something
     updateVehiclePoses(query_pose);
 
@@ -207,14 +276,11 @@ void CalculatorNode::odomCallback(const Odometry::ConstSharedPtr msg)
   geometry_msgs::msg::Pose query_pose = msg->pose.pose;
   updateVehiclePoses(query_pose);
 
-  // getCurrentLanelets はマップ全体を走査する重い処理。1tickにつき1回だけ計算し、
+  // 車両位置を含むlaneletは1tickにつき1回だけ求め、
   // vehicleIsInsideLane/checkLaneStatus/publishBBOX/appendToCSV で使い回す。
-  // 注意: query::getCurrentLanelets()は結果をpush_backするだけでclearしないため、
-  // 呼び出し前に必ずclear()すること(current_lanelets_by_pose_はメンバ変数で使い回すため、
-  // clearし忘れると毎tick際限なく要素が増え続け、CPU負荷が時間とともに際限なく悪化する)。
-  current_lanelets_by_pose_.clear();
-  has_current_lanelets_by_pose_ =
-    lanelet::utils::query::getCurrentLanelets(const_lanelets_, query_pose, &current_lanelets_by_pose_);
+  // findCurrentLanelets()は最初に結果をclearするので、メンバ変数を使い回しても要素は積み上がらない
+  // (query::getCurrentLanelets()はclearしないので、直接使う場合は呼び出し前のclear()が必須)。
+  has_current_lanelets_by_pose_ = findCurrentLanelets(query_pose, &current_lanelets_by_pose_);
 
   vehicleIsInsideLane();
   diagnostics_updater_.force_update();
